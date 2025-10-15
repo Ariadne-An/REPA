@@ -1,0 +1,124 @@
+# U-REPA + SD-1.5 Configuration - Track B (Main Result)
+# 500k samples, 120k steps, ~4 hours on A100
+
+# ============================================================================
+# Experiment Metadata
+# ============================================================================
+experiment_name: "sd15_repa_档B"
+seed: 42
+
+# ============================================================================
+# Data Paths
+# ============================================================================
+csv_path: "data/train_500k.csv"  # 500k samples for Track B
+latent_dir: "data/vae_latents"
+dino_dir: "data/dino_tokens"
+clip_embeddings_path: "data/clip_embeddings_1001.pt"
+
+# ============================================================================
+# VAE Configuration
+# ============================================================================
+latent_scale: 0.18215  # SD-VAE scaling factor (CRITICAL: must match preprocessing)
+
+# ============================================================================
+# DINO Configuration
+# ============================================================================
+dino_model_id: "dinov3_vitl16"  # DINOv3 ViT-L/16
+dino_transform_id: "dinov3_vitl16_official"  # Official transforms version
+align_layers: ["mid"]  # Alignment layers: ["mid"] or ["enc_last", "mid", "dec_first"]
+dino_D: 1024  # DINOv3-L dimension
+
+# ============================================================================
+# Scheduler Configuration
+# ============================================================================
+schedule:
+  name: "linear"  # Options: "linear" or "cosine"
+  parametrization: "v"  # Options: "v" or "epsilon"
+  weighting: "uniform"  # Options: "uniform" or "lognormal"
+
+# ============================================================================
+# LoRA Configuration
+# ============================================================================
+use_lora: true
+lora_rank: 32
+lora_targets: "attn+conv"  # Options: "attn+conv" or "attention-only"
+lora_alpha: 32  # Typically equal to rank
+
+# ============================================================================
+# Loss Configuration
+# ============================================================================
+align_coeff: 0.8  # λ: weight for alignment loss
+manifold_coeff: 3.0  # w: weight for manifold loss (relative to token loss)
+manifold_upper_only: false  # Use upper triangle only in Gram matrix
+manifold_mask_diag: false  # Mask diagonal in Gram matrix
+
+# ============================================================================
+# Training Configuration
+# ============================================================================
+batch_size: 64  # Larger batch for Track B
+max_steps: 120000  # 2x of Track A
+num_epochs: 100  # Will be overridden by max_steps
+learning_rate: 2.0e-4  # Higher LR for LoRA
+weight_decay: 0.01
+ema_decay: 0.9995
+cfg_dropout: 0.1  # Label dropout probability for CFG
+gradient_clip: 1.0
+mixed_precision: "bf16"  # Options: "no", "fp16", "bf16"
+num_workers: 8
+
+# ============================================================================
+# Optimization Schedule
+# ============================================================================
+warmup_ratio: 0.1  # Warmup steps = warmup_ratio * max_steps
+lr_schedule: "cosine"  # Options: "cosine", "linear", "constant"
+
+# ============================================================================
+# Logging & Evaluation
+# ============================================================================
+log_interval: 100  # Log every N steps
+eval_interval: 5000  # Evaluate every N steps
+save_interval: 10000  # Save checkpoint every N steps
+report_to: "wandb"  # Options: "wandb", "tensorboard", "none"
+
+# FID convergence targets (for plotting)
+eval_fid_targets: [5.0, 3.0, 2.0, 1.5]
+
+# Evaluation settings
+eval_num_samples: 50000  # More samples for Track B
+eval_batch_size: 64
+eval_cfg_scale: 7.5  # CFG scale for sampling
+eval_num_inference_steps: 250  # NFE (Number of Function Evaluations)
+eval_guidance_high: 0.7  # Upper bound for guidance interval
+
+# ============================================================================
+# Output Configuration
+# ============================================================================
+output_dir: "exps"
+checkpoint_dir: "checkpoints"
+log_dir: "logs"
+
+# ============================================================================
+# Model Paths
+# ============================================================================
+pretrained_model_name_or_path: "runwayml/stable-diffusion-v1-5"
+vae_name_or_path: "runwayml/stable-diffusion-v1-5"  # Use same VAE
+dino_ckpt_path: "checkpoints/dinov3_vitl16.pth"  # Local DINO checkpoint
+
+# ============================================================================
+# Resume Training
+# ============================================================================
+resume_from_checkpoint: null  # Set to checkpoint path to resume
+resume_step: 0
+
+# ============================================================================
+# Reproducibility
+# ============================================================================
+# Note: These settings are for reproducibility
+# Set cudnn.deterministic = True and cudnn.benchmark = False in code
+deterministic: true
+
+# ============================================================================
+# Debug Mode
+# ============================================================================
+debug: false  # Enable debug mode for verbose logging
+debug_steps: 10  # Run only N steps in debug mode
