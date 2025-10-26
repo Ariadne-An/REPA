@@ -7,14 +7,13 @@ visual tokens that serve as alignment targets.
 Key Features:
 - Load from torch.hub or local checkpoint
 - Official DINOv2 transforms (Resize→CenterCrop→Normalize)
-- Extract 196 tokens [14×14 grid, D=1024]
-- Handles 16×16→14×14 spatial downsampling (DINOv2 vitl14 outputs 256 tokens)
+- Extract 256 tokens [16×16 grid, D=1024]
 - L2 normalize tokens for alignment
 
 Usage:
     encoder = DINOv2Encoder(ckpt_path='checkpoints/dinov2_vitl14.pth')
     transform = encoder.get_transforms()
-    tokens = encoder.extract_tokens(images)  # [B, 196, 1024]
+    tokens = encoder.extract_tokens(images)  # [B, 256, 1024]
 """
 
 import torch
@@ -30,7 +29,7 @@ class DINOv2Encoder(nn.Module):
     This class provides:
     - from_local_ckpt() to load local checkpoint
     - get_transforms() to get official transforms
-    - extract_tokens() to get patch tokens [B, 196, 1024]
+    - extract_tokens() to get patch tokens [B, 256, 1024]
 
     Attributes:
         model: DINOv2 ViT-L/14 model
@@ -127,7 +126,7 @@ class DINOv2Encoder(nn.Module):
             normalize: Whether to L2 normalize tokens (default: True)
 
         Returns:
-            tokens: [B, 196, 1024] tensor (14×14 grid)
+            tokens: [B, 256, 1024] tensor (16×16 grid)
         """
         self.model.eval()
 
@@ -152,25 +151,13 @@ class DINOv2Encoder(nn.Module):
             # Fallback: assume output is [B, N+1, D], remove first token (CLS)
             tokens = output[:, 1:]
 
-        # Handle different token counts (DINOv2 vitl14 outputs 16×16=256)
         B, N, D = tokens.shape
-        if N == 256:  # 16×16 grid from vitl14
-            # Reshape to spatial: [B, 256, 1024] → [B, 1024, 16, 16]
-            tokens = tokens.transpose(1, 2).reshape(B, D, 16, 16)
-            # Downsample to 14×14: [B, 1024, 16, 16] → [B, 1024, 14, 14]
-            tokens = F.interpolate(tokens, size=(14, 14), mode='bilinear', align_corners=False)
-            # Reshape back: [B, 1024, 14, 14] → [B, 196, 1024]
-            tokens = tokens.reshape(B, D, 196).transpose(1, 2)
-        elif N != 196:
-            raise ValueError(f"Unexpected token count: {N}. Expected 256 (16×16) or 196 (14×14)")
-
-        # Verify final shape
-        assert tokens.shape == (B, 196, 1024), \
-            f"Expected [{B}, 196, 1024], got {tokens.shape}"
+        if (N, D) != (256, 1024):
+            raise ValueError(f"Unexpected token shape {tokens.shape}, expected [B, 256, 1024]")
 
         # L2 normalize each token
         if normalize:
-            tokens = F.normalize(tokens, dim=-1)  # [B, 196, 1024]
+            tokens = F.normalize(tokens, dim=-1)  # [B, 256, 1024]
 
         return tokens
 
@@ -183,7 +170,7 @@ class DINOv2Encoder(nn.Module):
             normalize: Whether to L2 normalize tokens
 
         Returns:
-            tokens: [B, 196, 1024] tensor
+            tokens: [B, 256, 1024] tensor
         """
         return self.extract_tokens(images, normalize=normalize)
 

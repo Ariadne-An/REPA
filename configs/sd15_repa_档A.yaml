@@ -10,10 +10,10 @@ seed: 42
 # ============================================================================
 # Data Paths
 # ============================================================================
-csv_path: "data/train_200k.csv"
-latent_dir: "data/vae_latents"
-dino_dir: "data/dino_tokens"
-clip_embeddings_path: "data/clip_embeddings_1001.pt"
+csv_path: "/workspace/data/train_200k.csv"
+latent_dir: "/workspace/data/vae_latents_lmdb"
+dino_dir: "/dev/shm/dino_tokens_lmdb"
+clip_embeddings_path: "/workspace/data/clip_embeddings_1001.pt"
 
 # ============================================================================
 # VAE Configuration
@@ -23,8 +23,10 @@ latent_scale: 0.18215  # SD-VAE scaling factor (CRITICAL: must match preprocessi
 # ============================================================================
 # DINO Configuration
 # ============================================================================
-dino_model_id: "dinov2_vitl14"  # DINOv2 ViT-L/14
+dino_model: "dinov2_vitl14"  # DINOv2 ViT-L/14
 dino_transform_id: "dinov2_vitl14_official"  # Official transforms version
+dino_grid: 16  # DINO token grid size (16x16)
+dino_num_tokens: 256  # Number of tokens per sample
 align_layers: ["mid"]  # Alignment layers: ["mid"] or ["enc_last", "mid", "dec_first"]
 dino_D: 1024  # DINOv2-L dimension
 
@@ -40,25 +42,30 @@ schedule:
 # LoRA Configuration
 # ============================================================================
 use_lora: true
-lora_rank: 32
-lora_targets: "attn+conv"  # Options: "attn+conv" or "attention-only"
-lora_alpha: 32  # Typically equal to rank
+lora_rank: 8
+lora_alpha: 8
+lora_targets: "attn"  # Attention-only for mid-block self-attn
+lora_lr: 1.0e-4
+lora_weight_decay: 0.0
+align_head_lr: 1.0e-4
+align_head_weight_decay: 0.01
 
 # ============================================================================
 # Loss Configuration
 # ============================================================================
-align_coeff: 0.8  # λ: weight for alignment loss
+align_coeff: 0.5  # Final λ after warmup
+align_warmup_steps: 3000  # Linear ramp from 0 → λ
 manifold_coeff: 3.0  # w: weight for manifold loss (relative to token loss)
-manifold_upper_only: false  # Use upper triangle only in Gram matrix
-manifold_mask_diag: false  # Mask diagonal in Gram matrix
+manifold_upper_only: true  # Use upper triangle only in Gram matrix
+manifold_mask_diag: true  # Mask diagonal in Gram matrix
 
 # ============================================================================
 # Training Configuration
 # ============================================================================
-batch_size: 48
-max_steps: 60000
-num_epochs: 100  # Will be overridden by max_steps
-learning_rate: 2.0e-4  # Higher LR for LoRA
+batch_size: 128
+max_steps: 60000  # Used if epoch_count is not provided
+epoch_count: 40  # Preferred: overrides max_steps based on dataset length
+learning_rate: 1.0e-4
 weight_decay: 0.01
 ema_decay: 0.9995
 cfg_dropout: 0.1  # Label dropout probability for CFG
@@ -77,7 +84,16 @@ lr_schedule: "cosine"  # Options: "cosine", "linear", "constant"
 # ============================================================================
 log_interval: 100  # Log every N steps
 eval_interval: 5000  # Evaluate every N steps
-save_interval: 10000  # Save checkpoint every N steps
+save_interval: 6000  # Save checkpoint every N steps (≈4 epochs)
+val_csv_path: "/workspace/data/val_50k.csv"
+val_latent_dir: "/workspace/data/val_vae_latents_lmdb_fixed"
+val_dino_dir: "/workspace/data/val_dino_tokens_lmdb"
+val_clip_embeddings_path: "/workspace/data/clip_embeddings_1001.pt"
+val_batch_size: 64
+val_num_batches: 50
+val_interval: 3000
+val_repeat: 3
+local_log_path: "logs/trackA_train.jsonl"
 report_to: "wandb"  # Options: "wandb", "tensorboard", "none"
 
 # FID convergence targets (for plotting)

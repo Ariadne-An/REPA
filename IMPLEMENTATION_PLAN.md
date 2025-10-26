@@ -17,7 +17,7 @@
 |------|------|------|
 | **基础模型** | SD-1.5 U-Net (runwayml/stable-diffusion-v1-5) | 成熟稳定，生态完善 |
 | **分辨率** | 512×512 (latent 64×64×4) | 更接近实际应用，方便后续编辑任务 |
-| **对齐目标** | DINOv2 ViT-L/14 (D=1024, 14×14 grid) | 最强语义编码器 |
+| **对齐目标** | DINOv2 ViT-L/14 (D=1024, 16×16 grid) | 最强语义编码器 |
 | **对齐层** | mid_block (默认) + 可选 enc_last/dec_first | U-REPA 论文核心发现：中段最优 |
 | **微调方式** | LoRA (rank=32) + 可选 partial full-FT | 集中火力在对齐层，减少显存 |
 
@@ -62,7 +62,7 @@ L_manifold = F.mse_loss(Mx, My)
 ```
 
 **优点**:
-- 计算量从 O(B×196²) → O(B²)
+- 计算量从 O(B×256²) → O(B²)
 - 保留全局几何关系
 - 与 token-wise loss 互补
 
@@ -102,14 +102,14 @@ class AlignHead(nn.Module):
         x = self.proj(feat)  # [B, D, H, W] (e.g., [B, 1024, 8, 8])
         if x.shape[2] != 14:
             x = F.interpolate(x, (14, 14), mode='bilinear', align_corners=False)
-        x = x.flatten(2).transpose(1, 2)  # [B, 196, D]
+        x = x.flatten(2).transpose(1, 2)  # [B, 256, D]
         return F.normalize(x, dim=-1)  # L2 normalize
 ```
 
 **关键点**:
 - 先投影 C→D (1280→1024)
-- 后上采样到 14×14 (与 DINOv2 token grid 对齐)
-- 输出 L2 归一化的 tokens [B, 196, 1024]
+- 后上采样到 16×16 (与 DINOv2 token grid 对齐)
+- 输出 L2 归一化的 tokens [B, 256, 1024]
 
 #### (E) 条件输入: 复用 SD-1.5 原生 cross-attention
 
@@ -240,19 +240,19 @@ ILSVRC/
                            std=[0.229, 0.224, 0.225])
    ])
    ```
-2. 前向得到 tokens [196, 1024]
+2. 前向得到 tokens [256, 1024]
 3. L2 归一化每个 token
 4. 保存为 fp16/bf16
 
 **存储**:
 - 格式: LMDB 分片
 - Key: 样本 id (与 VAE latent 对齐)
-- Value: [196, 1024] 的 tokens (fp16/bf16)
+- Value: [256, 1024] 的 tokens (fp16/bf16)
 - 总大小: ~160 GB (200k 张) / ~400 GB (500k 张)
 
 **元信息**: `{"encoder": "dinov2-vit-l-16", "D": 1024, "grid": 14, "patch": 16}`
 
-**启动校验**: 强制检查 D=1024, N=196，不符报错
+**启动校验**: 强制检查 D=1024, N=256，不符报错
 
 ### 3.4 CLIP Text Embeddings 缓存
 
@@ -301,12 +301,12 @@ REPA/
 
 ```python
 class AlignHead(nn.Module):
-    """对齐头: 1280 → 1024, ↑14×14"""
+    """对齐头: 1280 → 1024, ↑16×16"""
     def __init__(self, in_ch=1280, D=1024):
         ...
 
     def forward(self, feat):
-        # [B, C, H, W] → [B, 196, D] (L2-normalized)
+        # [B, C, H, W] → [B, 256, D] (L2-normalized)
         ...
 
 class SD15UNetAligned(nn.Module):
@@ -320,7 +320,7 @@ class SD15UNetAligned(nn.Module):
         ...
 
     def get_aligned_tokens(self):
-        # 返回 dict: {layer_name: [B, 196, D]}
+        # 返回 dict: {layer_name: [B, 256, D]}
         ...
 
     def clear_hooks(self):
@@ -357,7 +357,7 @@ class SD15AlignedDataset(Dataset):
         # 返回 dict:
         # {
         #     'latent': [4, 64, 64],
-        #     'dino_tokens': {'mid': [196, 1024]},
+        #     'dino_tokens': {'mid': [256, 1024]},
         #     'encoder_hidden_states': [77, 768],
         #     'class_id': int
         # }
@@ -429,7 +429,7 @@ def main():
 
 - [ ] ImageNet 采样: 确保 1000 类均匀分布
 - [ ] VAE latent: shape=[4, 64, 64], dtype=fp16/bf16, 范围合理
-- [ ] DINO tokens: shape=[196, 1024], L2-normalized (norm≈1)
+- [ ] DINO tokens: shape=[256, 1024], L2-normalized (norm≈1)
 - [ ] CLIP embeddings: shape=[1001, 77, 768], 包含 null prompt
 
 ### 6.2 训练启动

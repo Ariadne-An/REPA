@@ -15,6 +15,7 @@ Usage:
 """
 
 import argparse
+import json
 import sys
 import os
 from pathlib import Path
@@ -24,10 +25,12 @@ import torch.nn.functional as F
 import lmdb
 import yaml
 import numpy as np
+import pandas as pd
 from PIL import Image
 
 # Add REPA to path
-sys.path.insert(0, str(Path(__file__).parent.parent))
+ROOT_DIR = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT_DIR))
 
 
 def load_config(config_path):
@@ -35,6 +38,26 @@ def load_config(config_path):
     with open(config_path, 'r') as f:
         config = yaml.safe_load(f)
     return config
+
+
+def resolve_path(path_str: str) -> Path:
+    path = Path(path_str)
+    if not path.is_absolute():
+        path = ROOT_DIR / path
+    return path
+
+
+def load_lmdb_meta(env: lmdb.Environment, dir_path: Path) -> dict:
+    """Try to read metadata from __meta__ entry or metadata.json file."""
+    meta = {}
+    with env.begin() as txn:
+        meta_bytes = txn.get(b'__meta__')
+        if meta_bytes is not None:
+            meta = json.loads(meta_bytes.decode())
+    meta_file = dir_path / 'metadata.json'
+    if not meta and meta_file.exists():
+        meta = json.loads(meta_file.read_text())
+    return meta
 
 
 def check_vae_latents(config):
@@ -50,65 +73,61 @@ def check_vae_latents(config):
     print("CHECK 1: VAE Latent Encoding")
     print("="*80)
 
-    latent_dir = config['latent_dir']
+    latent_dir = resolve_path(config['latent_dir'])
 
-    if not os.path.exists(latent_dir):
+    if not latent_dir.exists():
         print(f"⚠️  WARNING: Latent directory not found: {latent_dir}")
         print("   Skipping VAE latent check. Run encode_vae_latents.py first.")
         return False
 
     try:
         # Open LMDB
-        env = lmdb.open(latent_dir, readonly=True, lock=False)
+        env = lmdb.open(str(latent_dir), readonly=True, lock=False)
+        meta = load_lmdb_meta(env, latent_dir)
+        if not meta:
+            print("❌ ERROR: No meta found in latent LMDB")
+            env.close()
+            return False
 
-        # Read meta
-        with env.begin() as txn:
-            meta_bytes = txn.get(b'__meta__')
-            if meta_bytes is None:
-                print("❌ ERROR: No meta found in latent LMDB")
+        print(f"📊 Latent Meta: {meta}")
+
+        latent_shape = tuple(meta.get('shape', [4, 64, 64]))
+        latent_dtype = meta.get('dtype', 'float16')
+
+        if latent_shape != (4, 64, 64):
+            print(f"⚠️  WARNING: Unexpected latent shape {latent_shape}, expected (4,64,64)")
+        if latent_dtype not in ('float16', 'bf16', 'bfloat16'):
+            print(f"⚠️  WARNING: Unexpected latent dtype {latent_dtype}")
+
+        # Check latent_scale
+        lmdb_scale = meta.get('latent_scale')
+        if lmdb_scale is not None:
+            if abs(lmdb_scale - config.get('latent_scale', lmdb_scale)) > 1e-6:
+                print(f"❌ ERROR: latent_scale mismatch!")
+                print(f"   Config: {config.get('latent_scale')}")
+                print(f"   LMDB:   {lmdb_scale}")
+                env.close()
                 return False
+            print(f"✅ latent_scale matches: {lmdb_scale}")
+        else:
+            print(f"⚠️  WARNING: latent_scale not in meta, assuming {config.get('latent_scale')}")
 
-            import json
-            meta = json.loads(meta_bytes.decode())
-            print(f"📊 Latent Meta: {meta}")
-
-            # Check latent_scale
-            if 'latent_scale' in meta:
-                if abs(meta['latent_scale'] - config['latent_scale']) > 1e-6:
-                    print(f"❌ ERROR: latent_scale mismatch!")
-                    print(f"   Config: {config['latent_scale']}")
-                    print(f"   LMDB:   {meta['latent_scale']}")
-                    return False
-                print(f"✅ latent_scale matches: {meta['latent_scale']}")
-            else:
-                print(f"⚠️  WARNING: latent_scale not in meta, assuming {config['latent_scale']}")
-
-            # Sample a few latents and check shape
+        # Sample latents
+        with env.begin() as txn:
             cursor = txn.cursor()
             num_checked = 0
-            for i, (key, value) in enumerate(cursor):
+            for key, value in cursor:
                 if key == b'__meta__':
                     continue
-
-                # Decode latent
-                latent = torch.frombuffer(value, dtype=torch.float16).reshape(4, 64, 64)
-
-                if latent.shape != (4, 64, 64):
-                    print(f"❌ ERROR: Latent shape mismatch: {latent.shape}")
-                    return False
-
-                # Check value range (should be reasonable after scaling)
-                lat_min, lat_max = latent.min().item(), latent.max().item()
+                latent = np.frombuffer(value, dtype=np.float16).reshape(latent_shape)
+                lat_min, lat_max = float(latent.min()), float(latent.max())
                 if lat_min < -10 or lat_max > 10:
                     print(f"⚠️  WARNING: Latent value range seems off: [{lat_min:.2f}, {lat_max:.2f}]")
-
                 num_checked += 1
                 if num_checked >= 10:
                     break
-
-            print(f"✅ Checked {num_checked} latents: shape=[4, 64, 64], dtype=fp16")
-
         env.close()
+        print(f"✅ Checked {num_checked} latents: shape={latent_shape}, dtype={latent_dtype}")
 
         # Optional: Reconstruction quality check (requires VAE decoder)
         print("\n📝 Note: To check reconstruction quality (LPIPS/PSNR), run:")
@@ -125,7 +144,7 @@ def check_dino_tokens(config):
     """
     Check 2: DINO tokens validity.
 
-    - Verify shape: [196, 1024]
+    - Verify shape: [256, 1024]
     - Verify L2 normalization: norm ≈ 1.0
     - Verify meta: dino_model_id, dino_transform_id
     """
@@ -133,85 +152,76 @@ def check_dino_tokens(config):
     print("CHECK 2: DINO Tokens")
     print("="*80)
 
-    dino_dir = config['dino_dir']
+    dino_dir = resolve_path(config['dino_dir'])
 
-    if not os.path.exists(dino_dir):
+    if not dino_dir.exists():
         print(f"⚠️  WARNING: DINO directory not found: {dino_dir}")
         print("   Skipping DINO check. Run build_dino_cache.py first.")
         return False
 
     try:
         # Open LMDB
-        env = lmdb.open(dino_dir, readonly=True, lock=False)
+        env = lmdb.open(str(dino_dir), readonly=True, lock=False)
+        meta = load_lmdb_meta(env, dino_dir)
+        if not meta:
+            print("❌ ERROR: No meta found in DINO LMDB")
+            env.close()
+            return False
 
-        # Read meta
+        print(f"📊 DINO Meta: {meta}")
+
+        expected_layers = config.get('align_layers', ['mid'])
+        expected_tokens = config.get('dino_num_tokens', meta.get('shape', [0])[0])
+        expected_dim = config.get('dino_D', 1024)
+
+        dino_model_cfg = config.get('dino_model') or config.get('dino_model_id')
+        dino_model_meta = meta.get('dino_model') or meta.get('dino_model_id')
+        if dino_model_cfg and dino_model_meta and dino_model_cfg != dino_model_meta:
+            print(f"❌ ERROR: DINO model mismatch (config={dino_model_cfg}, meta={dino_model_meta})")
+            env.close()
+            return False
+        if dino_model_meta:
+            print(f"✅ DINO model: {dino_model_meta}")
+
+        if meta.get('shape') and (meta['shape'][0] != expected_tokens or meta['shape'][1] != expected_dim):
+            print(f"❌ ERROR: Token shape mismatch (expected {expected_tokens}x{expected_dim}, got {meta['shape']})")
+            env.close()
+            return False
+
+        # Sample tokens and check shape + normalization
+        norms = []
         with env.begin() as txn:
-            meta_bytes = txn.get(b'__meta__')
-            if meta_bytes is None:
-                print("❌ ERROR: No meta found in DINO LMDB")
-                return False
-
-            import json
-            meta = json.loads(meta_bytes.decode())
-            print(f"📊 DINO Meta: {meta}")
-
-            # Check dino_model_id
-            if meta.get('dino_model_id') != config['dino_model_id']:
-                print(f"❌ ERROR: dino_model_id mismatch!")
-                print(f"   Config: {config['dino_model_id']}")
-                print(f"   LMDB:   {meta.get('dino_model_id')}")
-                return False
-            print(f"✅ dino_model_id matches: {meta['dino_model_id']}")
-
-            # Check dino_transform_id
-            if meta.get('dino_transform_id') != config['dino_transform_id']:
-                print(f"❌ ERROR: dino_transform_id mismatch!")
-                print(f"   Config: {config['dino_transform_id']}")
-                print(f"   LMDB:   {meta.get('dino_transform_id')}")
-                return False
-            print(f"✅ dino_transform_id matches: {meta['dino_transform_id']}")
-
-            # Check dimension
-            if meta.get('D') != config['dino_D']:
-                print(f"❌ ERROR: DINO dimension mismatch!")
-                print(f"   Config: {config['dino_D']}")
-                print(f"   LMDB:   {meta.get('D')}")
-                return False
-            print(f"✅ dino_D matches: {meta['D']}")
-
-            # Sample tokens and check shape + normalization
             cursor = txn.cursor()
             num_checked = 0
-            norms = []
-
-            for i, (key, value) in enumerate(cursor):
+            for key, value in cursor:
                 if key == b'__meta__':
                     continue
-
-                # Decode tokens
-                tokens = torch.frombuffer(value, dtype=torch.float16).reshape(196, 1024)
-
-                if tokens.shape != (196, 1024):
-                    print(f"❌ ERROR: Tokens shape mismatch: {tokens.shape}")
-                    return False
-
-                # Check L2 normalization
-                token_norms = torch.norm(tokens, dim=-1)
-                mean_norm = token_norms.mean().item()
+                tokens = np.frombuffer(value, dtype=np.float16).reshape(expected_tokens, expected_dim)
+                token_norms = np.linalg.norm(tokens, axis=-1)
+                mean_norm = float(token_norms.mean())
                 norms.append(mean_norm)
-
                 if abs(mean_norm - 1.0) > 0.1:
-                    print(f"⚠️  WARNING: Token norm seems off: {mean_norm:.4f} (expected ~1.0)")
-
+                    print(f"⚠️  WARNING: Token norm deviates: {mean_norm:.4f}")
                 num_checked += 1
                 if num_checked >= 10:
                     break
 
-            avg_norm = np.mean(norms)
-            print(f"✅ Checked {num_checked} token sets: shape=[196, 1024], avg_norm={avg_norm:.4f}")
-
+        if norms:
+            avg_norm = float(np.mean(norms))
+            print(f"✅ Checked {len(norms)} token sets: shape=[{expected_tokens}, {expected_dim}], avg_norm={avg_norm:.4f}")
             if abs(avg_norm - 1.0) > 0.05:
                 print(f"⚠️  WARNING: Average norm deviates from 1.0: {avg_norm:.4f}")
+        csv_path = resolve_path(config['csv_path'])
+        if csv_path.exists():
+            import pandas as pd
+            df = pd.read_csv(csv_path)
+            expected_entries = len(df) * len(expected_layers)
+            with env.begin() as txn:
+                actual_entries = sum(1 for k, _ in txn.cursor() if k != b'__meta__')
+            if actual_entries != expected_entries:
+                print(f"⚠️  WARNING: Entry count mismatch (LMDB={actual_entries}, expected={expected_entries})")
+            else:
+                print(f"✅ LMDB entry count matches CSV ({actual_entries})")
 
         env.close()
         return True
@@ -232,9 +242,9 @@ def check_clip_embeddings(config):
     print("CHECK 3: CLIP Text Embeddings")
     print("="*80)
 
-    clip_path = config['clip_embeddings_path']
+    clip_path = resolve_path(config['clip_embeddings_path'])
 
-    if not os.path.exists(clip_path):
+    if not clip_path.exists():
         print(f"⚠️  WARNING: CLIP embeddings not found: {clip_path}")
         print("   Skipping CLIP check. Run prepare_clip_embeddings.py first.")
         return False

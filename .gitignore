@@ -10,3 +10,18 @@ __pycache__/
 *.egg-info/
 dist/
 build/
+assets/imagenet_class_index.json
+
+# Training outputs
+logs/
+wandb/
+checkpoints/
+outputs/
+*.log
+*.jsonl
+
+# Data directories
+data/
+datasets/
+*.lmdb
+*.mdb

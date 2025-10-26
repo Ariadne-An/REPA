@@ -56,7 +56,7 @@ class AlignHead(nn.Module):
             feat: [B, C, H, W] - U-Net 特征 (如 [B, 1280, 8, 8])
 
         Returns:
-            tokens: [B, N, D] - 对齐后的 tokens (如 [B, 196, 1024])
+            tokens: [B, N, D] - 对齐后的 tokens (如 [B, 256, 1024])
                     已 L2 归一化
         """
 ```
@@ -72,12 +72,12 @@ self.proj = nn.Sequential(
 def forward(self, feat):
     x = self.proj(feat)  # [B, D, H, W]
 
-    # 上采样到 14×14 (DINOv2 token grid)
+    # 上采样到 16×16 (DINOv2 token grid)
     if x.shape[2] != 14 or x.shape[3] != 14:
         x = F.interpolate(x, size=(14, 14), mode='bilinear', align_corners=False)
 
     # Flatten 到 token 序列
-    x = x.flatten(2).transpose(1, 2)  # [B, 196, D]
+    x = x.flatten(2).transpose(1, 2)  # [B, 256, D]
 
     # L2 normalize
     x = F.normalize(x, dim=-1)
@@ -87,7 +87,7 @@ def forward(self, feat):
 
 **校验**:
 - 输入 shape: `[B, 1280, 8, 8]`
-- 输出 shape: `[B, 196, 1024]`
+- 输出 shape: `[B, 256, 1024]`
 - 输出 norm: `torch.norm(output, dim=-1).mean() ≈ 1.0`
 
 ---
@@ -198,7 +198,7 @@ class SD15UNetAligned(nn.Module):
         获取对齐后的 tokens (从 hook 特征经过对齐头)。
 
         Returns:
-            tokens: dict of {layer_name: [B, 196, D]}
+            tokens: dict of {layer_name: [B, 256, D]}
         """
 
     def clear_features(self):
@@ -264,7 +264,7 @@ def get_aligned_tokens(self):
     tokens = {}
     for layer_name in self.align_layers:
         feat = self.hook_manager.get_feature(layer_name)  # [B, 1280, 8, 8]
-        tokens[layer_name] = self.align_heads[layer_name](feat)  # [B, 196, 1024]
+        tokens[layer_name] = self.align_heads[layer_name](feat)  # [B, 256, 1024]
     return tokens
 ```
 
@@ -407,7 +407,7 @@ class SD15Loss:
         Args:
             unet: SD15UNetAligned 模型
             clean_latents: [B, 4, 64, 64] - 干净的 VAE latents
-            dino_tokens: dict of {layer_name: [B, 196, 1024]} - 目标 DINO tokens
+            dino_tokens: dict of {layer_name: [B, 256, 1024]} - 目标 DINO tokens
             encoder_hidden_states: [B, 77, 768] - CLIP text embeddings
             timesteps: [B] - 可选，指定 timesteps
 
@@ -477,7 +477,7 @@ class SD15AlignedDataset(Dataset):
         Returns:
             {
                 'latent': [4, 64, 64] - VAE latent (fp16/bf16)
-                'dino_tokens': dict of {layer_name: [196, 1024]} - DINO tokens
+                'dino_tokens': dict of {layer_name: [256, 1024]} - DINO tokens
                 'encoder_hidden_states': [77, 768] - CLIP text embedding
                 'class_id': int - ImageNet class id
             }
@@ -518,7 +518,7 @@ def __getitem__(self, idx):
         for layer_name in self.align_layers:
             key = f"{sample_id}_{layer_name}".encode()
             tokens_bytes = txn.get(key)
-            tokens = torch.frombuffer(tokens_bytes, dtype=torch.float16).reshape(196, 1024)
+            tokens = torch.frombuffer(tokens_bytes, dtype=torch.float16).reshape(256, 1024)
             dino_tokens[layer_name] = tokens
 
     # CFG: 随机 dropout label
@@ -538,7 +538,7 @@ def __getitem__(self, idx):
 
 **校验**:
 - 确保 latent shape: `[4, 64, 64]`
-- 确保 dino_tokens shape: `{layer: [196, 1024]}`
+- 确保 dino_tokens shape: `{layer: [256, 1024]}`
 - 确保 encoder_hidden_states shape: `[77, 768]`
 - 确保 CFG dropout 生效 (10% 的样本 class_id=1000)
 
@@ -731,7 +731,7 @@ python preprocessing/build_dino_cache.py \
   --num_workers 8
 ```
 
-**输出**: LMDB 数据库 (key=sample_id_mid, value=[196,1024] tokens)
+**输出**: LMDB 数据库 (key=sample_id_mid, value=[256,1024] tokens)
 
 ---
 
@@ -849,10 +849,10 @@ train_sd15.py
 | 变量名 | Shape | Dtype | 说明 |
 |--------|-------|-------|------|
 | `latent` | [B, 4, 64, 64] | bf16/fp16 | VAE latent (512×512 → 64×64) |
-| `dino_tokens` | {layer: [B, 196, 1024]} | bf16/fp16 | DINO tokens (14×14=196) |
+| `dino_tokens` | {layer: [B, 256, 1024]} | bf16/fp16 | DINO tokens (16×16=256) |
 | `encoder_hidden_states` | [B, 77, 768] | bf16/fp16 | CLIP text embeddings |
 | `timesteps` | [B] | long | Timestep indices (0-999) |
-| `pred_tokens` | {layer: [B, 196, 1024]} | bf16/fp16 | 对齐后的 tokens (L2-normalized) |
+| `pred_tokens` | {layer: [B, 256, 1024]} | bf16/fp16 | 对齐后的 tokens (L2-normalized) |
 | `Gram` | [B, B] | bf16/fp16 | 样本-样本相似度矩阵 |
 
 ### 6.2 Loss Dict
@@ -901,7 +901,7 @@ def test_align_head():
     feat = torch.randn(2, 1280, 8, 8)
     tokens = head(feat)
 
-    assert tokens.shape == (2, 196, 1024)
+    assert tokens.shape == (2, 256, 1024)
     assert torch.allclose(torch.norm(tokens, dim=-1).mean(), torch.tensor(1.0), atol=0.01)
 ```
 
@@ -909,8 +909,8 @@ def test_align_head():
 
 ```python
 def test_manifold_loss():
-    x = torch.randn(4, 196, 1024)
-    y = torch.randn(4, 196, 1024)
+    x = torch.randn(4, 256, 1024)
+    y = torch.randn(4, 256, 1024)
     loss = manifold_gram_loss(x, y)
 
     assert loss.ndim == 0  # scalar
@@ -933,7 +933,7 @@ def test_sd15_unet_aligned():
 
     tokens = unet_aligned.get_aligned_tokens()
     assert 'mid' in tokens
-    assert tokens['mid'].shape == (2, 196, 1024)
+    assert tokens['mid'].shape == (2, 256, 1024)
 ```
 
 ---
@@ -948,8 +948,8 @@ def visualize_aligned_tokens(pred_tokens, dino_tokens, save_path):
     用 t-SNE 可视化对齐效果。
 
     Args:
-        pred_tokens: [B, 196, D]
-        dino_tokens: [B, 196, D]
+        pred_tokens: [B, 256, D]
+        dino_tokens: [B, 256, D]
         save_path: str
     """
     from sklearn.manifold import TSNE

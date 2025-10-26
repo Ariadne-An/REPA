@@ -1,4 +1,6 @@
 import os
+import json
+from pathlib import Path
 from typing import Dict, List, Optional
 
 import lmdb
@@ -22,7 +24,7 @@ class SD15AlignedDataset(Dataset):
 
     Each sample returns:
         - latent: [4, 64, 64] clean latent (float32)
-        - dino_tokens: dict[layer_name -> [196, 1024]] (float32)
+        - dino_tokens: dict[layer_name -> [256, 1024]] (float32)
         - encoder_hidden_states: [77, 768] CLIP text embedding (float32)
         - class_id: int (after CFG dropout)
     """
@@ -48,8 +50,13 @@ class SD15AlignedDataset(Dataset):
                 f"CSV file {csv_path} must contain 'id' and 'class_id' columns."
             )
 
-        self.latent_env = self._open_lmdb(latent_dir)
-        self.dino_env = self._open_lmdb(dino_dir)
+        self.latent_dir = latent_dir
+        self.dino_dir = dino_dir
+
+        self._latent_env = None
+        self._dino_env = None
+        self.latent_shape = self._load_lmdb_shape(latent_dir, default=(4, 64, 64))
+        self.token_shape = self._load_lmdb_shape(dino_dir, default=(256, 1024))
 
         clip_embeddings = torch.load(clip_embeddings_path, map_location='cpu')
         if clip_embeddings.ndim != 3 or clip_embeddings.shape[1:] != (77, 768):
@@ -96,24 +103,56 @@ class SD15AlignedDataset(Dataset):
         }
 
     def _read_latent(self, sample_id: str) -> torch.Tensor:
-        with self.latent_env.begin(write=False) as txn:
+        env = self._get_latent_env()
+        with env.begin(write=False) as txn:
             value = txn.get(sample_id.encode('utf-8'))
             if value is None:
                 raise KeyError(f"Latent not found for id={sample_id}")
-            return _as_float32_tensor(memoryview(value), [4, 64, 64])
+            return _as_float32_tensor(memoryview(value), list(self.latent_shape))
 
     def _read_dino_tokens(self, sample_id: str) -> Dict[str, torch.Tensor]:
         tokens: Dict[str, torch.Tensor] = {}
-        with self.dino_env.begin(write=False) as txn:
+        env = self._get_dino_env()
+        with env.begin(write=False) as txn:
             for layer_name in self.align_layers:
                 key = f"{sample_id}_{layer_name}".encode('utf-8')
                 value = txn.get(key)
                 if value is None:
                     raise KeyError(f"DINO tokens not found for key={key!r}")
-                tokens[layer_name] = _as_float32_tensor(memoryview(value), [196, 1024])
+                tokens[layer_name] = _as_float32_tensor(memoryview(value), list(self.token_shape))
         return tokens
 
     def __del__(self):
-        for env in [getattr(self, 'latent_env', None), getattr(self, 'dino_env', None)]:
+        for env in [getattr(self, '_latent_env', None), getattr(self, '_dino_env', None)]:
             if isinstance(env, lmdb.Environment):
                 env.close()
+
+    def __getstate__(self):
+        state = self.__dict__.copy()
+        state['_latent_env'] = None
+        state['_dino_env'] = None
+        return state
+
+    def _get_latent_env(self) -> lmdb.Environment:
+        if self._latent_env is None:
+            self._latent_env = self._open_lmdb(self.latent_dir)
+        return self._latent_env
+
+    def _get_dino_env(self) -> lmdb.Environment:
+        if self._dino_env is None:
+            self._dino_env = self._open_lmdb(self.dino_dir)
+        return self._dino_env
+
+    def _load_lmdb_shape(self, dir_path: str, default: tuple) -> tuple:
+        env = self._open_lmdb(dir_path)
+        meta = {}
+        meta_path = Path(dir_path) / "metadata.json"
+        if meta_path.exists():
+            meta = json.loads(meta_path.read_text())
+        else:
+            with env.begin() as txn:
+                meta_bytes = txn.get(b"__meta__")
+                if meta_bytes:
+                    meta = json.loads(meta_bytes.decode())
+        env.close()
+        return tuple(meta.get("shape", default))

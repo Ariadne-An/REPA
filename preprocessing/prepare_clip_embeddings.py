@@ -37,7 +37,7 @@ def load_imagenet_classes(json_path):
         class_dict = json.load(f)
 
     # Convert to list sorted by class_id
-    class_names = [class_dict[str(i)] for i in range(1000)]
+    class_names = [class_dict[str(i)][1] if isinstance(class_dict[str(i)], list) else class_dict[str(i)] for i in range(1000)]
 
     print(f"📊 Loaded {len(class_names)} classes")
     print(f"   Examples: {class_names[:5]}")

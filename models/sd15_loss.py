@@ -46,6 +46,8 @@ class SD15REPALoss(nn.Module):
         self,
         align_coeff=0.8,
         manifold_coeff=3.0,
+        manifold_mask_diag: bool = False,
+        manifold_upper_only: bool = False,
     ):
         """
         Initialize SD15REPALoss.
@@ -58,6 +60,8 @@ class SD15REPALoss(nn.Module):
 
         self.align_coeff = align_coeff
         self.manifold_coeff = manifold_coeff
+        self.manifold_mask_diag = manifold_mask_diag
+        self.manifold_upper_only = manifold_upper_only
 
     def compute_diffusion_loss(self, pred, target):
         """
@@ -81,60 +85,57 @@ class SD15REPALoss(nn.Module):
         Token loss: L_token = 1/N * Σ (1 - cos_sim(z_i, z̃_i))
 
         Args:
-            pred_tokens: [B, 196, 1024] predicted alignment tokens
-            target_tokens: [B, 196, 1024] target DINO tokens (L2 normalized)
+            pred_tokens: [B, N, 1024] predicted alignment tokens (N≈256)
+            target_tokens: [B, N, 1024] target DINO tokens (L2 normalized)
 
         Returns:
             loss: [B] per-sample loss
         """
         # L2 normalize both (target should already be normalized)
-        pred_tokens = F.normalize(pred_tokens, dim=-1)    # [B, 196, 1024]
-        target_tokens = F.normalize(target_tokens, dim=-1)  # [B, 196, 1024]
+        pred_tokens = F.normalize(pred_tokens, dim=-1)
+        target_tokens = F.normalize(target_tokens, dim=-1)
 
         # Cosine similarity: element-wise dot product and sum
-        cos_sim = (pred_tokens * target_tokens).sum(dim=-1)  # [B, 196]
+        cos_sim = (pred_tokens * target_tokens).sum(dim=-1)
 
         # Negative cosine similarity averaged over tokens
-        token_loss = 1.0 - cos_sim  # [B, 196]
+        token_loss = 1.0 - cos_sim
         token_loss = token_loss.mean(dim=-1)  # [B]
 
         return token_loss
 
     def compute_manifold_loss(self, pred_tokens, target_tokens):
         """
-        Compute manifold alignment loss via Gram matrix.
+        Compute manifold alignment loss via sample-wise Gram matrices.
 
-        Manifold loss compares the Gram matrices G = Z·Z^T and G̃ = Z̃·Z̃^T
-        where Z and Z̃ are token matrices.
-
-        This is O(B²) complexity - compares all pairs within a batch.
-
-        Args:
-            pred_tokens: [B, 196, 1024] predicted alignment tokens
-            target_tokens: [B, 196, 1024] target DINO tokens
-
-        Returns:
-            loss: scalar loss (averaged over batch)
+        Steps:
+            1. Mean-pool tokens → [B, D]
+            2. L2 normalize pooled vectors
+            3. Compute Gram matrices in the batch dimension
         """
-        B, N, D = pred_tokens.shape
+        pred_mean = pred_tokens.mean(dim=1)  # [B, D]
+        target_mean = target_tokens.mean(dim=1)
 
-        # L2 normalize tokens
-        pred_tokens = F.normalize(pred_tokens, dim=-1)    # [B, 196, 1024]
-        target_tokens = F.normalize(target_tokens, dim=-1)  # [B, 196, 1024]
+        pred_mean = F.normalize(pred_mean, dim=-1)
+        target_mean = F.normalize(target_mean, dim=-1)
 
-        # Flatten to [B, N*D]
-        pred_flat = pred_tokens.reshape(B, N * D)      # [B, 196*1024]
-        target_flat = target_tokens.reshape(B, N * D)  # [B, 196*1024]
+        gram_pred = pred_mean @ pred_mean.t()         # [B, B]
+        gram_target = target_mean @ target_mean.t()   # [B, B]
 
-        # Compute Gram matrices: [B, B]
-        # G[i,j] = <z_i, z_j> measures similarity between samples i and j
-        gram_pred = torch.mm(pred_flat, pred_flat.t())       # [B, B]
-        gram_target = torch.mm(target_flat, target_flat.t())  # [B, B]
+        diff = gram_pred - gram_target
+        if self.manifold_mask_diag:
+            diff = diff - torch.diag_embed(torch.diagonal(diff, dim1=-2, dim2=-1))
 
-        # MSE between Gram matrices
-        manifold_loss = F.mse_loss(gram_pred, gram_target, reduction='mean')
+        if self.manifold_upper_only:
+            mask = torch.triu(
+                torch.ones_like(diff),
+                diagonal=1 if self.manifold_mask_diag else 0,
+            )
+            masked = diff * mask
+            denom = mask.sum().clamp_min(1.0)
+            return (masked.pow(2).sum() / denom)
 
-        return manifold_loss
+        return diff.pow(2).mean()
 
     def forward(
         self,
@@ -169,7 +170,7 @@ class SD15REPALoss(nn.Module):
         )
 
         pred = output['pred']                      # [B, 4, 64, 64]
-        align_tokens = output['align_tokens']      # {'mid': [B, 196, 1024]}
+        align_tokens = output['align_tokens']      # {'mid': [B, 256, 1024]}
 
         # 1. Diffusion loss
         diffusion_loss = self.compute_diffusion_loss(pred, target)  # [B]
@@ -216,12 +217,12 @@ def test_loss_computation():
     pred = torch.randn(B, 4, 64, 64)
     target = torch.randn_like(pred)
     pred_tokens = {
-        'mid': torch.randn(B, 196, 1024),
-        'enc_last': torch.randn(B, 196, 1024),
+        'mid': torch.randn(B, 256, 1024),
+        'enc_last': torch.randn(B, 256, 1024),
     }
     target_tokens = {
-        'mid': torch.randn(B, 196, 1024),
-        'enc_last': torch.randn(B, 196, 1024),
+        'mid': torch.randn(B, 256, 1024),
+        'enc_last': torch.randn(B, 256, 1024),
     }
 
     class DummyModel(torch.nn.Module):

@@ -9,7 +9,7 @@ This module implements the core U-REPA architecture:
 Key Design:
 - Alignment at mid_block (layer 18, resolution 8×8, C=1280)
 - Optional alignment at enc_last/dec_first (layer 12/24)
-- Project-then-upsample: Conv1×1 projection → bilinear upsample to 14×14
+- Project-then-upsample: Conv1×1 projection → bilinear upsample to 16×16
 - LoRA fine-tuning on alignment layers only
 
 Usage:
@@ -28,7 +28,7 @@ Usage:
         return_align_tokens=True
     )
     # out['pred']: [B, 4, 64, 64] prediction (epsilon or v)
-    # out['align_tokens']['mid']: [B, 196, 1024] projected tokens
+    # out['align_tokens']['mid']: [B, 256, 1024] projected tokens
 """
 
 import torch
@@ -44,8 +44,8 @@ class AlignHead(nn.Module):
 
     Architecture:
         1. Conv 1×1: [B, C, H, W] → [B, D, H, W]
-        2. Bilinear upsample: [B, D, H, W] → [B, D, 14, 14]
-        3. Reshape: [B, D, 14, 14] → [B, 196, D]
+        2. Bilinear upsample: [B, D, H, W] → [B, D, 16, 16]
+        3. Reshape: [B, D, 16, 16] → [B, 256, D]
 
     This follows U-REPA's "project-then-upsample" strategy.
     """
@@ -63,18 +63,11 @@ class AlignHead(nn.Module):
         self.in_channels = in_channels
         self.out_dim = out_dim
 
-        # Conv 1×1 projection + normalization + activation
+        hidden_dim = out_dim
         self.proj = nn.Sequential(
-            nn.Conv2d(
-                in_channels,
-                out_dim,
-                kernel_size=1,
-                stride=1,
-                padding=0,
-                bias=False,
-            ),
-            nn.GroupNorm(32, out_dim),
+            nn.Conv2d(in_channels, hidden_dim, kernel_size=1, bias=True),
             nn.GELU(),
+            nn.Conv2d(hidden_dim, out_dim, kernel_size=1, bias=False),
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -85,22 +78,22 @@ class AlignHead(nn.Module):
             x: [B, C, H, W] U-Net features
 
         Returns:
-            tokens: [B, 196, D] projected tokens
+            tokens: [B, 256, D] projected tokens
         """
         # Project: [B, C, H, W] → [B, D, H, W]
         x = self.proj(x)
 
-        # Upsample to 14×14 if needed
-        if x.shape[-2:] != (14, 14):
+        # Upsample to 16×16 if needed
+        if x.shape[-2:] != (16, 16):
             x = F.interpolate(
                 x,
-                size=(14, 14),
+                size=(16, 16),
                 mode='bilinear',
                 align_corners=False
             )
 
-        # Reshape: [B, D, 14, 14] → [B, 196, D]
-        tokens = x.flatten(2).transpose(1, 2)  # [B, 196, D]
+        # Reshape: [B, D, 16, 16] → [B, 256, D]
+        tokens = x.flatten(2).transpose(1, 2)  # [B, 256, D]
         tokens = F.normalize(tokens, dim=-1)
 
         return tokens
@@ -224,6 +217,7 @@ class SD15UNetAligned(nn.Module):
         use_lora: bool = True,
         lora_rank: int = 32,
         lora_targets: str = 'attn+conv',  # 'attn', 'conv', 'attn+conv'
+        lora_alpha: Optional[int] = None,
         device: str = 'cuda'
     ):
         """
@@ -246,6 +240,7 @@ class SD15UNetAligned(nn.Module):
         self.use_lora = use_lora
         self.lora_rank = lora_rank
         self.lora_targets = lora_targets
+        self.lora_alpha = lora_alpha if lora_alpha is not None else lora_rank
         self.device = device
 
         # Validate align_layers
@@ -318,7 +313,7 @@ class SD15UNetAligned(nn.Module):
         # Create LoRA config
         lora_config = LoraConfig(
             r=self.lora_rank,
-            lora_alpha=self.lora_rank,  # Typical: alpha = rank
+            lora_alpha=self.lora_alpha,
             target_modules=target_modules,
             lora_dropout=0.0,
             bias='none',
@@ -396,7 +391,7 @@ class SD15UNetAligned(nn.Module):
         Returns:
             outputs: Dict with keys:
                 - 'pred': [B, 4, 64, 64] prediction (epsilon or v)
-                - 'align_tokens': Dict[layer_name → [B, 196, 1024]] (if return_align_tokens=True)
+                - 'align_tokens': Dict[layer_name → [B, 256, 1024]] (if return_align_tokens=True)
         """
         # Clear previous features
         self.hook_manager.clear_features()
@@ -429,7 +424,7 @@ class SD15UNetAligned(nn.Module):
                 # Get feature [B, C, H, W]
                 feat = features[layer_name]
 
-                # Project to tokens [B, 196, 1024]
+                # Project to tokens [B, 256, 1024]
                 tokens = self.align_heads[layer_name](feat)
 
                 align_tokens[layer_name] = tokens
