@@ -3,7 +3,7 @@ Build DINO token cache from preprocessed images.
 
 This script:
 1. Reads images from the ZIP file produced by dataset_tools.py convert
-2. Applies DINOv3 official transforms
+2. Applies DINOv2 official transforms
 3. Extracts DINO tokens [196, 1024]
 4. L2 normalizes each token
 5. Saves to LMDB format
@@ -12,7 +12,7 @@ Usage:
     python preprocessing/build_dino_cache.py \
         --source data/images \
         --dest data/dino_tokens \
-        --dino_ckpt checkpoints/dinov3_vitl16.pth \
+        --dino_ckpt checkpoints/dinov2_vitl14.pth \
         --batch_size 64 \
         --num_workers 4
 """
@@ -32,9 +32,9 @@ from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms
 
 
-class DINOv3Encoder:
+class DINOv2Encoder:
     """
-    DINOv3 ViT-L/16 encoder wrapper.
+    DINOv2 ViT-L/14 encoder wrapper.
 
     This class provides:
     - from_local_ckpt() to load local checkpoint
@@ -45,8 +45,8 @@ class DINOv3Encoder:
     def __init__(self, ckpt_path=None, device='cuda'):
         self.device = device
         self.model = None
-        self.model_id = "dinov3_vitl16"
-        self.transform_id = "dinov3_vitl16_official"
+        self.model_id = "dinov2_vitl14"
+        self.transform_id = "dinov2_vitl14_official"
 
         if ckpt_path:
             self.load_from_local(ckpt_path)
@@ -54,15 +54,15 @@ class DINOv3Encoder:
             self.load_from_hub()
 
     def load_from_hub(self):
-        """Load DINOv3 from torch.hub."""
-        print("📥 Loading DINOv3 from torch.hub...")
+        """Load DINOv2 from torch.hub."""
+        print("📥 Loading DINOv2 from torch.hub...")
         self.model = torch.hub.load('facebookresearch/dinov2', 'dinov2_vitl14')
         self.model = self.model.eval().to(self.device)
-        print("✅ Loaded DINOv3 ViT-L/14 from torch.hub")
+        print("✅ Loaded DINOv2 ViT-L/14 from torch.hub")
 
     def load_from_local(self, ckpt_path):
-        """Load DINOv3 from local checkpoint."""
-        print(f"📥 Loading DINOv3 from: {ckpt_path}")
+        """Load DINOv2 from local checkpoint."""
+        print(f"📥 Loading DINOv2 from: {ckpt_path}")
 
         # Load model architecture from hub (without weights)
         self.model = torch.hub.load('facebookresearch/dinov2', 'dinov2_vitl14')
@@ -80,12 +80,12 @@ class DINOv3Encoder:
         self.model.load_state_dict(state_dict, strict=False)
         self.model = self.model.eval().to(self.device)
 
-        print(f"✅ Loaded DINOv3 from local checkpoint")
+        print(f"✅ Loaded DINOv2 from local checkpoint")
 
     @staticmethod
     def get_transforms():
         """
-        Get official DINOv3 transforms.
+        Get official DINOv2 transforms.
 
         Returns:
             transforms: torchvision transforms
@@ -112,7 +112,7 @@ class DINOv3Encoder:
         self.model.eval()
 
         # Forward pass
-        # DINOv2/v3 returns [B, N, D] where N=196 (14x14), D=1024 (for ViT-L)
+        # DINOv2 returns [B, N, D] where N=196 (14x14), D=1024 (for ViT-L)
         output = self.model.forward_features(images)
 
         # Get patch tokens (exclude CLS token if present)
@@ -176,7 +176,7 @@ def build_dino_cache(source_dir, dest_dir, dino_encoder, batch_size=64, num_work
     Args:
         source_dir: Directory containing dataset.zip from official convert
         dest_dir: Output LMDB directory
-        dino_encoder: DINOv3Encoder instance
+        dino_encoder: DINOv2Encoder instance
         batch_size: Batch size for processing
         num_workers: Number of workers for dataloader
     """
@@ -191,7 +191,7 @@ def build_dino_cache(source_dir, dest_dir, dino_encoder, batch_size=64, num_work
     print(f"📂 Input ZIP: {zip_path}")
 
     # Create dataset
-    transform = DINOv3Encoder.get_transforms()
+    transform = DINOv2Encoder.get_transforms()
     dataset = ZipImageDataset(zip_path, transform=transform)
     dataloader = DataLoader(
         dataset,
@@ -299,7 +299,7 @@ def main():
         '--dino_ckpt',
         type=str,
         default=None,
-        help="Path to local DINOv3 checkpoint (if None, load from torch.hub)"
+        help="Path to local DINOv2 checkpoint (if None, load from torch.hub)"
     )
     parser.add_argument(
         '--batch_size',
@@ -332,7 +332,7 @@ def main():
         args.device = 'cpu'
 
     # Load DINO encoder
-    dino_encoder = DINOv3Encoder(ckpt_path=args.dino_ckpt, device=args.device)
+    dino_encoder = DINOv2Encoder(ckpt_path=args.dino_ckpt, device=args.device)
 
     # Build cache
     build_dino_cache(

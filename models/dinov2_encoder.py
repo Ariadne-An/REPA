@@ -1,18 +1,18 @@
 """
-DINOv3 encoder for U-REPA SD-1.5.
+DINOv2 encoder for U-REPA SD-1.5.
 
 This module provides a wrapper around DINOv2 ViT-L/14 for extracting
 visual tokens that serve as alignment targets.
 
 Key Features:
 - Load from torch.hub or local checkpoint
-- Official DINOv3 transforms (Resize→CenterCrop→Normalize)
+- Official DINOv2 transforms (Resize→CenterCrop→Normalize)
 - Extract 196 tokens [14×14 grid, D=1024]
 - Handles 16×16→14×14 spatial downsampling (DINOv2 vitl14 outputs 256 tokens)
 - L2 normalize tokens for alignment
 
 Usage:
-    encoder = DINOv3Encoder(ckpt_path='checkpoints/dinov3_vitl16.pth')
+    encoder = DINOv2Encoder(ckpt_path='checkpoints/dinov2_vitl14.pth')
     transform = encoder.get_transforms()
     tokens = encoder.extract_tokens(images)  # [B, 196, 1024]
 """
@@ -23,9 +23,9 @@ import torch.nn.functional as F
 from torchvision import transforms
 
 
-class DINOv3Encoder(nn.Module):
+class DINOv2Encoder(nn.Module):
     """
-    DINOv3 ViT-L/14 encoder wrapper.
+    DINOv2 ViT-L/14 encoder wrapper.
 
     This class provides:
     - from_local_ckpt() to load local checkpoint
@@ -33,7 +33,7 @@ class DINOv3Encoder(nn.Module):
     - extract_tokens() to get patch tokens [B, 196, 1024]
 
     Attributes:
-        model: DINOv3 ViT-L/14 model
+        model: DINOv2 ViT-L/14 model
         model_id: Model identifier for validation
         transform_id: Transform identifier for validation
         device: Device (cuda/cpu)
@@ -41,7 +41,7 @@ class DINOv3Encoder(nn.Module):
 
     def __init__(self, ckpt_path=None, device='cuda'):
         """
-        Initialize DINOv3 encoder.
+        Initialize DINOv2 encoder.
 
         Args:
             ckpt_path: Path to local checkpoint (if None, load from torch.hub)
@@ -51,8 +51,8 @@ class DINOv3Encoder(nn.Module):
 
         self.device = device
         self.model = None
-        self.model_id = "dinov3_vitl16"
-        self.transform_id = "dinov3_vitl16_official"
+        self.model_id = "dinov2_vitl14"
+        self.transform_id = "dinov2_vitl14_official"
 
         if ckpt_path:
             self.load_from_local(ckpt_path)
@@ -60,20 +60,20 @@ class DINOv3Encoder(nn.Module):
             self.load_from_hub()
 
     def load_from_hub(self):
-        """Load DINOv3 from torch.hub."""
-        print("📥 Loading DINOv3 from torch.hub...")
+        """Load DINOv2 from torch.hub."""
+        print("📥 Loading DINOv2 from torch.hub...")
         self.model = torch.hub.load('facebookresearch/dinov2', 'dinov2_vitl14')
         self.model = self.model.eval().to(self.device)
-        print("✅ Loaded DINOv3 ViT-L/14 from torch.hub")
+        print("✅ Loaded DINOv2 ViT-L/14 from torch.hub")
 
     def load_from_local(self, ckpt_path):
         """
-        Load DINOv3 from local checkpoint.
+        Load DINOv2 from local checkpoint.
 
         Args:
             ckpt_path: Path to checkpoint file
         """
-        print(f"📥 Loading DINOv3 from: {ckpt_path}")
+        print(f"📥 Loading DINOv2 from: {ckpt_path}")
 
         # Load model architecture from hub (without weights)
         self.model = torch.hub.load('facebookresearch/dinov2', 'dinov2_vitl14')
@@ -91,14 +91,14 @@ class DINOv3Encoder(nn.Module):
         self.model.load_state_dict(state_dict, strict=False)
         self.model = self.model.eval().to(self.device)
 
-        print(f"✅ Loaded DINOv3 from local checkpoint")
+        print(f"✅ Loaded DINOv2 from local checkpoint")
 
     @staticmethod
     def get_transforms():
         """
-        Get official DINOv3 transforms.
+        Get official DINOv2 transforms.
 
-        These transforms match the official DINOv3 evaluation protocol:
+        These transforms match the official DINOv2 evaluation protocol:
         1. Resize to 256 with bicubic interpolation
         2. Center crop to 224
         3. ToTensor (converts to [0,1])
@@ -136,13 +136,13 @@ class DINOv3Encoder(nn.Module):
             images = images.to(self.device)
 
         # Forward pass
-        # DINOv2/v3 returns dict with multiple outputs
+        # DINOv2 returns dict with multiple outputs
         output = self.model.forward_features(images)
 
         # Get patch tokens (exclude CLS token if present)
-        # Different DINOv2/v3 versions may have different output formats
+        # Different DINOv2 checkpoints may have slightly different output formats
         if 'x_norm_patchtokens' in output:
-            # Official DINOv3 format
+            # Official DINOv2 format
             tokens = output['x_norm_patchtokens']  # [B, N, 1024]
         elif isinstance(output, dict) and 'x' in output:
             # Alternative format: extract from 'x' and remove CLS
@@ -188,14 +188,14 @@ class DINOv3Encoder(nn.Module):
         return self.extract_tokens(images, normalize=normalize)
 
 
-def test_dinov3_encoder():
-    """Test DINOv3Encoder with random input."""
+def test_dinov2_encoder():
+    """Test DINOv2Encoder with random input."""
     print("="*80)
-    print("Testing DINOv3Encoder")
+    print("Testing DINOv2Encoder")
     print("="*80)
 
     # Create encoder
-    encoder = DINOv3Encoder(device='cuda' if torch.cuda.is_available() else 'cpu')
+    encoder = DINOv2Encoder(device='cuda' if torch.cuda.is_available() else 'cpu')
 
     # Test transforms
     transform = encoder.get_transforms()
@@ -215,8 +215,8 @@ def test_dinov3_encoder():
     tokens_unnorm = encoder.extract_tokens(images, normalize=False)
     print(f"   Unnormalized token norm: {tokens_unnorm[0, 0].norm().item():.4f}")
 
-    print("\n🎉 DINOv3Encoder test passed!")
+    print("\n🎉 DINOv2Encoder test passed!")
 
 
 if __name__ == '__main__':
-    test_dinov3_encoder()
+    test_dinov2_encoder()

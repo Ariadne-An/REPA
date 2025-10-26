@@ -21,6 +21,7 @@ import click
 import numpy as np
 import PIL.Image
 import torch
+from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
 from encoders import StabilityVAEEncoder
@@ -375,38 +376,151 @@ def convert(
 
 #----------------------------------------------------------------------------
 
+class VAEDataset(Dataset):
+    def __init__(self, source: str, max_images: Optional[int] = None):
+        self.source = source
+        self.is_zip = os.path.isfile(source) and file_ext(source) == 'zip'
+        self.root = source if not self.is_zip else None
+        self._zip_file = None
+        self.entries = self._gather_entries(max_images)
+
+    def __len__(self):
+        return len(self.entries)
+
+    def __getitem__(self, idx):
+        rel_path, label = self.entries[idx]
+        img = self._load_image(rel_path)
+        tensor = torch.from_numpy(img).permute(2, 0, 1).contiguous()
+        label_tensor = torch.tensor(-1 if label is None else label, dtype=torch.int64)
+        return tensor, label_tensor
+
+    def _gather_entries(self, max_images: Optional[int]):
+        if self.is_zip:
+            return self._gather_from_zip(max_images)
+        return self._gather_from_folder(max_images)
+
+    def _load_image(self, rel_path: str):
+        if self.is_zip:
+            zf = self._get_zip_file()
+            with zf.open(rel_path, 'r') as f:
+                return np.array(PIL.Image.open(f).convert('RGB'))
+        else:
+            path = os.path.join(self.root, rel_path)
+            return np.array(PIL.Image.open(path).convert('RGB'))
+
+    def _gather_from_zip(self, max_images):
+        with zipfile.ZipFile(self.source, 'r') as zf:
+            names = [name for name in sorted(zf.namelist()) if is_image_ext(name)]
+            if max_images is not None:
+                names = names[:max_images]
+            label_map = {}
+            if 'dataset.json' in zf.namelist():
+                metadata = json.loads(zf.read('dataset.json'))
+                labels = metadata.get('labels')
+                if labels is not None:
+                    label_map = {entry[0]: entry[1] for entry in labels}
+            return [(name, label_map.get(name)) for name in names]
+
+    def _gather_from_folder(self, max_images):
+        root = Path(self.source)
+        all_files = sorted([
+            str(path.relative_to(root)).replace('\\', '/')
+            for path in root.rglob('*')
+            if path.is_file() and is_image_ext(path)
+        ])
+        if max_images is not None:
+            all_files = all_files[:max_images]
+
+        label_map = {}
+        meta_path = root / 'dataset.json'
+        if meta_path.is_file():
+            with open(meta_path, 'r') as f:
+                metadata = json.load(f)
+                labels = metadata.get('labels')
+                if labels is not None:
+                    label_map = {entry[0]: entry[1] for entry in labels}
+        return [(path, label_map.get(path)) for path in all_files]
+
+    def _get_zip_file(self):
+        if self._zip_file is None:
+            self._zip_file = zipfile.ZipFile(self.source, 'r')
+        return self._zip_file
+
+    def __getstate__(self):
+        state = self.__dict__.copy()
+        state['_zip_file'] = None
+        return state
+
+    def __del__(self):
+        if self._zip_file is not None:
+            self._zip_file.close()
+
+#----------------------------------------------------------------------------
+
 @cmdline.command()
 @click.option('--model-url',  help='VAE encoder model', metavar='URL',                  type=str, default='stabilityai/sd-vae-ft-mse', show_default=True)
 @click.option('--source',     help='Input directory or archive name', metavar='PATH',   type=str, required=True)
 @click.option('--dest',       help='Output directory or archive name', metavar='PATH',  type=str, required=True)
 @click.option('--max-images', help='Maximum number of images to output', metavar='INT', type=int)
+@click.option('--vae-batch-size', help='Batch size fed to the VAE encoder', metavar='INT', type=int, default=32, show_default=True)
+@click.option('--num-workers', help='Number of workers for image loading', metavar='INT', type=int, default=4, show_default=True)
 
 def encode(
     model_url: str,
     source: str,
     dest: str,
     max_images: Optional[int],
+    vae_batch_size: int,
+    num_workers: int,
 ):
     """Encode pixel data to VAE latents."""
     PIL.Image.init()
     if dest == '':
         raise click.ClickException('--dest output filename or directory must not be an empty string')
 
-    vae = StabilityVAEEncoder(vae_name=model_url, batch_size=1)
-    num_files, input_iter = open_dataset(source, max_images=max_images)
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    vae = StabilityVAEEncoder(vae_name=model_url, batch_size=vae_batch_size)
+    vae.init(device)
+
+    dataset = VAEDataset(source, max_images=max_images)
+    if len(dataset) == 0:
+        raise click.ClickException('No images found in the provided source.')
+
+    dataloader = DataLoader(
+        dataset,
+        batch_size=vae_batch_size,
+        num_workers=max(0, num_workers),
+        pin_memory=True,
+        shuffle=False,
+        drop_last=False,
+        persistent_workers=(num_workers > 0),
+    )
+
     archive_root_dir, save_bytes, close_dest = open_dest(dest)
     labels = []
 
-    for idx, image in tqdm(enumerate(input_iter), total=num_files):
-        img_tensor = torch.tensor(image.img).to('cuda').permute(2, 0, 1).unsqueeze(0)
-        mean_std = vae.encode_pixels(img_tensor)[0].cpu()
-        idx_str = f'{idx:08d}'
-        archive_fname = f'{idx_str[:5]}/img-mean-std-{idx_str}.npy'
+    progress = tqdm(total=len(dataset), desc='Encoding VAE latents')
+    sample_index = 0
 
-        f = io.BytesIO()
-        np.save(f, mean_std)
-        save_bytes(os.path.join(archive_root_dir, archive_fname), f.getvalue())
-        labels.append([archive_fname, image.label] if image.label is not None else None)
+    for batch_imgs, batch_labels in dataloader:
+        batch_size = batch_imgs.shape[0]
+        batch_imgs = batch_imgs.to(device=device, dtype=torch.float32, non_blocking=True)
+        mean_std = vae.encode_pixels(batch_imgs).cpu().numpy()
+        label_list = batch_labels.tolist()
+
+        for latent, label in zip(mean_std, label_list):
+            idx_str = f'{sample_index:08d}'
+            archive_fname = f'{idx_str[:5]}/img-mean-std-{idx_str}.npy'
+
+            f = io.BytesIO()
+            np.save(f, latent)
+            save_bytes(os.path.join(archive_root_dir, archive_fname), f.getvalue())
+            labels.append([archive_fname, label] if label >= 0 else None)
+            sample_index += 1
+
+        progress.update(batch_size)
+
+    progress.close()
 
     metadata = {'labels': labels if all(x is not None for x in labels) else None}
     save_bytes(os.path.join(archive_root_dir, 'dataset.json'), json.dumps(metadata))

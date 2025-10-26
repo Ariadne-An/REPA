@@ -23,10 +23,10 @@ latent_scale: 0.18215  # SD-VAE scaling factor (CRITICAL: must match preprocessi
 # ============================================================================
 # DINO Configuration
 # ============================================================================
-dino_model_id: "dinov3_vitl16"  # DINOv3 ViT-L/16
-dino_transform_id: "dinov3_vitl16_official"  # Official transforms version
+dino_model_id: "dinov2_vitl14"  # DINOv2 ViT-L/14
+dino_transform_id: "dinov2_vitl14_official"  # Official transforms version
 align_layers: ["mid"]  # Alignment layers: ["mid"] or ["enc_last", "mid", "dec_first"]
-dino_D: 1024  # DINOv3-L dimension
+dino_D: 1024  # DINOv2-L dimension
 
 # ============================================================================
 # Scheduler Configuration
@@ -102,7 +102,7 @@ log_dir: "logs"
 # ============================================================================
 pretrained_model_name_or_path: "runwayml/stable-diffusion-v1-5"
 vae_name_or_path: "runwayml/stable-diffusion-v1-5"  # Use same VAE
-dino_ckpt_path: "checkpoints/dinov3_vitl16.pth"  # Local DINO checkpoint
+dino_ckpt_path: "checkpoints/dinov2_vitl14.pth"  # Local DINO checkpoint
 
 # ============================================================================
 # Resume Training

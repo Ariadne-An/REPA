@@ -56,26 +56,26 @@ class AlignHead(nn.Module):
 
         Args:
             in_channels: Input channels (C)
-            out_dim: Output dimension (D, default: 1024 for DINOv3)
+            out_dim: Output dimension (D, default: 1024 for DINOv2)
         """
         super().__init__()
 
         self.in_channels = in_channels
         self.out_dim = out_dim
 
-        # Conv 1×1 projection
-        self.proj = nn.Conv2d(
-            in_channels,
-            out_dim,
-            kernel_size=1,
-            stride=1,
-            padding=0,
-            bias=True
+        # Conv 1×1 projection + normalization + activation
+        self.proj = nn.Sequential(
+            nn.Conv2d(
+                in_channels,
+                out_dim,
+                kernel_size=1,
+                stride=1,
+                padding=0,
+                bias=False,
+            ),
+            nn.GroupNorm(32, out_dim),
+            nn.GELU(),
         )
-
-        # Initialize with small weights
-        nn.init.xavier_uniform_(self.proj.weight)
-        nn.init.zeros_(self.proj.bias)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -100,8 +100,8 @@ class AlignHead(nn.Module):
             )
 
         # Reshape: [B, D, 14, 14] → [B, 196, D]
-        B, D, H, W = x.shape
         tokens = x.flatten(2).transpose(1, 2)  # [B, 196, D]
+        tokens = F.normalize(tokens, dim=-1)
 
         return tokens
 
