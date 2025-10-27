@@ -93,6 +93,7 @@ val_batch_size: 64
 val_num_batches: 50
 val_interval: 3000
 val_repeat: 3
+val_cfg_dropout: 0.1
 local_log_path: "logs/trackA_train.jsonl"
 report_to: "wandb"  # Options: "wandb", "tensorboard", "none"
 

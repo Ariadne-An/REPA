@@ -50,6 +50,7 @@ def parse_args():
     parser.add_argument("--val-interval", type=int, default=None, help="Override validation interval (steps)")
     parser.add_argument("--val-num-batches", type=int, default=None, help="Override validation batches per eval")
     parser.add_argument("--val-repeat", type=int, default=None, help="Repeat validation loop N times for averaging")
+    parser.add_argument("--val-cfg-dropout", type=float, default=None, help="Override validation CFG dropout rate")
 
     parser.add_argument("--epochs", type=int, default=None, help="Number of epochs to train (overrides max_steps)")
     parser.add_argument("--local-log", type=str, default=None, help="Path to append local JSON logs")
@@ -70,6 +71,7 @@ def apply_overrides(config: Dict, args: argparse.Namespace) -> Dict:
         "val_dino_dir": args.val_dino_dir,
         "val_clip_embeddings_path": args.val_clip_embeddings,
         "local_log_path": args.local_log,
+        "val_cfg_dropout": args.val_cfg_dropout,
     }
     for key, value in overrides.items():
         if value is not None:
@@ -217,14 +219,17 @@ def build_val_dataloader(config: Dict) -> Optional[DataLoader]:
     if not all(k in config for k in required_keys):
         return None
 
+    val_cfg_dropout = config.get("val_cfg_dropout", config.get("cfg_dropout", 0.1))
+    val_seed = config.get("val_seed", config.get("seed", 42) + 1)
+
     dataset = SD15AlignedDataset(
         csv_path=config["val_csv_path"],
         latent_dir=config["val_latent_dir"],
         dino_dir=config["val_dino_dir"],
         clip_embeddings_path=config["val_clip_embeddings_path"],
         align_layers=config["align_layers"],
-        cfg_dropout=0.0,
-        seed=config.get("seed", 42) + 1,
+        cfg_dropout=val_cfg_dropout,
+        seed=val_seed,
     )
 
     val_workers = config.get("val_num_workers", config.get("num_workers", 8))
