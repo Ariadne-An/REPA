@@ -51,14 +51,32 @@ def load_checkpoint(checkpoint_path, use_ema=False):
         ema_path = checkpoint_path.parent / "ema.pt"
         if ema_path.exists():
             print(f"✓ Loading EMA weights from {ema_path}")
-            state_dict = torch.load(ema_path, map_location="cpu")
-            return state_dict
+            ema_state = torch.load(ema_path, map_location="cpu", weights_only=False)
+            if isinstance(ema_state, dict) and "shadow" in ema_state:
+                ema_state = ema_state["shadow"]
+
+            # We still need LoRA tensors (stored only in main checkpoint)
+            print(f"✓ Loading base checkpoint for LoRA tensors: {checkpoint_path}")
+            base_state = load_checkpoint(checkpoint_path, use_ema=False)
+
+            merged_state = {}
+            for key, value in base_state.items():
+                if key in ema_state:
+                    merged_state[key] = ema_state[key]
+                else:
+                    merged_state[key] = value
+            return merged_state
 
     print(f"✓ Loading model weights from {checkpoint_path}")
-    state_dict = {}
-    with safe_open(checkpoint_path, framework="pt", device="cpu") as f:
-        for key in f.keys():
-            state_dict[key] = f.get_tensor(key)
+
+    # Support both .pt and .safetensors formats
+    if checkpoint_path.suffix == ".pt":
+        state_dict = torch.load(checkpoint_path, map_location="cpu")
+    else:
+        state_dict = {}
+        with safe_open(checkpoint_path, framework="pt", device="cpu") as f:
+            for key in f.keys():
+                state_dict[key] = f.get_tensor(key)
 
     return state_dict
 

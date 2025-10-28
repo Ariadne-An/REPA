@@ -133,6 +133,7 @@ def build_model(config: Dict, device: torch.device) -> SD15UNetAligned:
         lora_rank=config.get("lora_rank", 32),
         lora_targets=config.get("lora_targets", "attn+conv"),
         lora_alpha=config.get("lora_alpha"),
+        lora_train_layers=config.get("lora_train_layers"),
         device=str(device),
     )
     try:

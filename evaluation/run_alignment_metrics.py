@@ -122,15 +122,19 @@ def gather_features(
     prediction_type: str,
     timesteps: Iterable[int],
     device: torch.device,
+    null_prompt_embedding: Optional[torch.Tensor] = None,
 ) -> Dict[int, Dict[str, np.ndarray]]:
     """
     Returns:
-        {timestep: {"model": np.ndarray[B, D], "dino": np.ndarray[B, D], "labels": np.ndarray[B]}}
+        {timestep: {"model": np.ndarray[B, D], "model_uncond": np.ndarray[B, D],
+                    "dino": np.ndarray[B, D], "labels": np.ndarray[B]}}
+    model: conditioned features (for CKNNA)
+    model_uncond: unconditioned features using null prompt (for Linear Probing)
     """
     outputs = {}
     align_layer = model.align_layers[0]  # assume single layer for mean pooling
     for timestep in timesteps:
-        outputs[timestep] = {"model": [], "dino": [], "labels": []}
+        outputs[timestep] = {"model": [], "model_uncond": [], "dino": [], "labels": []}
 
     with torch.no_grad():
         for batch in tqdm(dataloader, desc="Extracting features"):
@@ -153,6 +157,7 @@ def gather_features(
                     noise = torch.randn_like(latent)
                     noisy_latent = scheduler.add_noise(latent, noise, ts)
 
+                # 1. Conditioned forward (with real prompt) - for CKNNA
                 enc_hidden = batch["encoder_hidden_states"].to(device)
                 output = model(
                     noisy_latent,
@@ -163,13 +168,31 @@ def gather_features(
                 align_tokens = output["align_tokens"][align_layer]  # [B,256,1024]
                 align_mean = align_tokens.mean(dim=1)  # [B,1024]
                 align_mean = torch.nn.functional.normalize(align_mean, dim=-1)
-
                 outputs[timestep]["model"].append(align_mean.cpu().numpy())
+
+                # 2. Unconditioned forward (with null prompt) - for Linear Probing
+                if null_prompt_embedding is not None:
+                    # Match dtype and device of the conditioned embedding
+                    enc_hidden_null = null_prompt_embedding.unsqueeze(0).expand(batch_size, -1, -1)
+                    enc_hidden_null = enc_hidden_null.to(device=device, dtype=enc_hidden.dtype)
+                    output_uncond = model(
+                        noisy_latent,
+                        ts,
+                        enc_hidden_null,
+                        return_align_tokens=True,
+                    )
+                    align_tokens_uncond = output_uncond["align_tokens"][align_layer]  # [B,256,1024]
+                    align_mean_uncond = align_tokens_uncond.mean(dim=1)  # [B,1024]
+                    align_mean_uncond = torch.nn.functional.normalize(align_mean_uncond, dim=-1)
+                    outputs[timestep]["model_uncond"].append(align_mean_uncond.cpu().numpy())
+
                 outputs[timestep]["dino"].append(dino_mean)
                 outputs[timestep]["labels"].append(labels)
 
     for timestep in timesteps:
         outputs[timestep]["model"] = np.concatenate(outputs[timestep]["model"], axis=0)
+        if null_prompt_embedding is not None:
+            outputs[timestep]["model_uncond"] = np.concatenate(outputs[timestep]["model_uncond"], axis=0)
         outputs[timestep]["dino"] = np.concatenate(outputs[timestep]["dino"], axis=0)
         outputs[timestep]["labels"] = np.concatenate(outputs[timestep]["labels"], axis=0)
     return outputs
@@ -244,6 +267,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--timesteps", type=str, default="-1,250,500", help="Comma-separated timesteps; use -1 for clean latent.")
     parser.add_argument("--scheduler-num-train-steps", type=int, default=1000)
     parser.add_argument("--knn-k", type=int, default=10)
+    parser.add_argument("--skip-linear", action="store_true", help="Skip linear probing evaluation.")
     return parser.parse_args()
 
 
@@ -264,6 +288,12 @@ def main() -> None:
         sample_size=args.sample_size,
         seed=args.seed,
     )
+
+    # Load null prompt embedding (empty string CLIP embedding)
+    # This is typically stored as the last embedding (class_id=1000) in the CLIP embeddings file
+    clip_embeddings_all = torch.load(args.clip_embeddings, map_location="cpu", weights_only=True)
+    null_prompt_embedding = clip_embeddings_all[-1]  # [77, 768] for SD1.5
+    print(f"✓ Loaded null prompt embedding: shape={null_prompt_embedding.shape}, dtype={null_prompt_embedding.dtype}")
 
     dataloader = DataLoader(
         dataset,
@@ -297,21 +327,23 @@ def main() -> None:
             prediction_type=prediction_type,
             timesteps=timesteps,
             device=device,
+            null_prompt_embedding=null_prompt_embedding,
         )
 
         result_entry = {}
-        # Linear probing at clean timestep (-1 assumed first element)
-        clean_t = timesteps[0]
-        feat_clean = features[clean_t]["model"]
-        labels_clean = features[clean_t]["labels"]
-        acc_model = linear_probing_accuracy(feat_clean, labels_clean, seed=args.seed)
-        acc_dino = linear_probing_accuracy(features[clean_t]["dino"], labels_clean, seed=args.seed)
-        result_entry["linear_probing"] = {
-            "model_tokens_acc": acc_model,
-            "dino_tokens_acc": acc_dino,
-        }
+        if not args.skip_linear:
+            clean_t = timesteps[0]
+            feat_clean_uncond = features[clean_t]["model_uncond"]
+            labels_clean = features[clean_t]["labels"]
+            acc_model = linear_probing_accuracy(feat_clean_uncond, labels_clean, seed=args.seed)
+            acc_dino = linear_probing_accuracy(features[clean_t]["dino"], labels_clean, seed=args.seed)
+            result_entry["linear_probing"] = {
+                "model_tokens_acc": acc_model,
+                "dino_tokens_acc": acc_dino,
+            }
 
         # CKNNA for each timestep
+        # Use CONDITIONED features (real prompts) for CKNNA to measure training-time alignment
         knn_scores = {}
         for t in timesteps:
             knn_scores[str(t)] = compute_cknna(features[t]["model"], features[t]["dino"], k=args.knn_k)
@@ -330,4 +362,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

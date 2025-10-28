@@ -204,9 +204,19 @@ class SD15UNetAligned(nn.Module):
 
     # Layer configurations
     LAYER_CONFIGS = {
+        'enc_mid': {'channels': 1280, 'resolution': 8},
         'enc_last': {'channels': 1280, 'resolution': 8},
         'mid': {'channels': 1280, 'resolution': 8},
         'dec_first': {'channels': 1280, 'resolution': 8},
+        'dec_second': {'channels': 1280, 'resolution': 8},
+    }
+
+    LORA_LAYER_MAP = {
+        'enc_mid': lambda self: self.unet.down_blocks[2],
+        'enc_last': lambda self: self.unet.down_blocks[3],
+        'mid': lambda self: self.unet.mid_block,
+        'dec_first': lambda self: self.unet.up_blocks[0],
+        'dec_second': lambda self: self.unet.up_blocks[1],
     }
 
     def __init__(
@@ -218,7 +228,8 @@ class SD15UNetAligned(nn.Module):
         lora_rank: int = 32,
         lora_targets: str = 'attn+conv',  # 'attn', 'conv', 'attn+conv'
         lora_alpha: Optional[int] = None,
-        device: str = 'cuda'
+        device: str = 'cuda',
+        lora_train_layers: Optional[List[str]] = None,
     ):
         """
         Initialize SD15UNetAligned.
@@ -242,6 +253,9 @@ class SD15UNetAligned(nn.Module):
         self.lora_targets = lora_targets
         self.lora_alpha = lora_alpha if lora_alpha is not None else lora_rank
         self.device = device
+        if lora_train_layers is None:
+            lora_train_layers = ['enc_mid', 'enc_last', 'mid', 'dec_first']
+        self.lora_train_layers = lora_train_layers
 
         # Validate align_layers
         for layer in align_layers:
@@ -250,7 +264,12 @@ class SD15UNetAligned(nn.Module):
                     f"Invalid align_layer: {layer}. "
                     f"Must be one of {list(self.LAYER_CONFIGS.keys())}"
                 )
-
+        for layer in self.lora_train_layers:
+            if layer not in self.LORA_LAYER_MAP:
+                raise ValueError(
+                    f"Invalid lora_train_layer: {layer}. "
+                    f"Must be one of {list(self.LORA_LAYER_MAP.keys())}"
+                )
         # Load U-Net
         print(f"📥 Loading U-Net from: {pretrained_model_name}")
         self.unet = UNet2DConditionModel.from_pretrained(
@@ -287,13 +306,13 @@ class SD15UNetAligned(nn.Module):
 
     def _apply_lora(self):
         """
-        Apply LoRA to alignment layers.
+        Apply LoRA adapters and freeze non-target U-Net blocks.
 
         This uses the peft library to add LoRA adapters to:
         - Attention layers (to_q, to_k, to_v, to_out)
         - Conv layers (conv1, conv2, conv_shortcut)
 
-        Only layers involved in alignment are unfrozen.
+        Only blocks listed in `self.lora_train_layers` keep trainable LoRA params.
         """
         from peft import LoraConfig, get_peft_model
 
@@ -321,9 +340,9 @@ class SD15UNetAligned(nn.Module):
         )
 
         # Apply LoRA to U-Net
-        # Note: We only want to apply LoRA to alignment layers, but peft
-        # applies to all matching modules. We'll freeze non-alignment layers
-        # after applying LoRA.
+        # peft attaches adapters to every matching module; we rely on
+        # `_freeze_non_alignment_layers` to keep only the requested blocks
+        # trainable according to `self.lora_train_layers`.
         self.unet = get_peft_model(self.unet, lora_config)
 
         # Freeze non-alignment layers
@@ -334,32 +353,26 @@ class SD15UNetAligned(nn.Module):
 
     def _freeze_non_alignment_layers(self):
         """
-        Freeze all U-Net parameters except those in alignment layers.
+        Freeze all U-Net parameters except those with LoRA adapters in selected blocks.
 
-        Alignment layers:
-        - 'enc_last': down_blocks[3]
-        - 'mid': mid_block
-        - 'dec_first': up_blocks[0]
+        Blocks are configured via `self.lora_train_layers`.
         """
         # First, freeze everything
         for param in self.unet.parameters():
             param.requires_grad = False
 
-        # Then unfreeze alignment layers
-        for layer_name in self.align_layers:
-            if layer_name == 'enc_last':
-                module = self.unet.down_blocks[3]
-            elif layer_name == 'mid':
-                module = self.unet.mid_block
-            elif layer_name == 'dec_first':
-                module = self.unet.up_blocks[0]
-
-            # Unfreeze LoRA parameters in this module
+        unfrozen_layers = []
+        for layer_name in self.lora_train_layers:
+            module_getter = self.LORA_LAYER_MAP.get(layer_name)
+            if module_getter is None:
+                continue
+            module = module_getter(self)
             for name, param in module.named_parameters():
                 if 'lora' in name.lower():
                     param.requires_grad = True
+            unfrozen_layers.append(layer_name)
 
-        print(f"✅ Unfroze LoRA params in: {self.align_layers}")
+        print(f"✅ Unfroze LoRA params in: {unfrozen_layers}")
 
     def _count_trainable_params(self) -> Tuple[int, int]:
         """

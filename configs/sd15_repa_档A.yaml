@@ -45,6 +45,12 @@ use_lora: true
 lora_rank: 8
 lora_alpha: 8
 lora_targets: "attn"  # Attention-only for mid-block self-attn
+lora_train_layers:
+  - enc_mid
+  - enc_last
+  - mid
+  - dec_first
+  - dec_second
 lora_lr: 1.0e-4
 lora_weight_decay: 0.0
 align_head_lr: 1.0e-4

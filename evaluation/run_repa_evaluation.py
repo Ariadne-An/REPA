@@ -41,7 +41,10 @@ from cleanfid import fid
 from diffusers import DPMSolverMultistepScheduler, StableDiffusionPipeline
 from torch.utils.data import DataLoader, Dataset
 from torchmetrics.image.inception import InceptionScore
-from torchmetrics.image.precision_recall import Precision, Recall
+try:
+    from torchmetrics.image.fid import FrechetInceptionDistance
+except ImportError:
+    FrechetInceptionDistance = None
 
 from models.sd15_unet_aligned import SD15UNetAligned
 
@@ -103,22 +106,63 @@ def load_pipeline(
     torch_dtype: torch.dtype,
     device: torch.device,
 ) -> StableDiffusionPipeline:
-    pipe = StableDiffusionPipeline.from_pretrained(
-        base_model_dir,
-        torch_dtype=torch_dtype,
-        safety_checker=None,
-    )
-    pipe.scheduler = DPMSolverMultistepScheduler.from_config(pipe.scheduler.config)
-
     if checkpoint is not None:
-        wrapper = instantiate_aligned_unet(config, base_model_dir, device="cpu")
-        state = torch.load(checkpoint, map_location="cpu")
-        missing, unexpected = wrapper.load_state_dict(state, strict=False)
-        if missing:
-            print(f"[WARN] Missing keys when loading {checkpoint.name}: {missing[:5]}...")
-        if unexpected:
-            print(f"[WARN] Unexpected keys when loading {checkpoint.name}: {unexpected[:5]}...")
-        pipe.unet.load_state_dict(wrapper.unet.state_dict(), strict=True)
+        if checkpoint.is_dir():
+            pipe = StableDiffusionPipeline.from_pretrained(
+                checkpoint,
+                torch_dtype=torch_dtype,
+                safety_checker=None,
+            )
+            pipe.scheduler = DPMSolverMultistepScheduler.from_config(pipe.scheduler.config)
+        elif checkpoint.suffix == ".safetensors":
+            try:
+                pipe = StableDiffusionPipeline.from_single_file(
+                    checkpoint,
+                    torch_dtype=torch_dtype,
+                    safety_checker=None,
+                )
+                pipe.scheduler = DPMSolverMultistepScheduler.from_config(pipe.scheduler.config)
+            except Exception:
+                from safetensors.torch import load_file
+
+                pipe = StableDiffusionPipeline.from_pretrained(
+                    base_model_dir,
+                    torch_dtype=torch_dtype,
+                    safety_checker=None,
+                )
+                pipe.scheduler = DPMSolverMultistepScheduler.from_config(pipe.scheduler.config)
+
+                wrapper = instantiate_aligned_unet(config, base_model_dir, device="cpu")
+                state = load_file(checkpoint)
+                missing, unexpected = wrapper.load_state_dict(state, strict=False)
+                if missing:
+                    print(f"[WARN] Missing keys when loading {checkpoint.name}: {missing[:5]}...")
+                if unexpected:
+                    print(f"[WARN] Unexpected keys when loading {checkpoint.name}: {unexpected[:5]}...")
+                pipe.unet.load_state_dict(wrapper.unet.state_dict(), strict=True)
+        else:
+            pipe = StableDiffusionPipeline.from_pretrained(
+                base_model_dir,
+                torch_dtype=torch_dtype,
+                safety_checker=None,
+            )
+            pipe.scheduler = DPMSolverMultistepScheduler.from_config(pipe.scheduler.config)
+
+            wrapper = instantiate_aligned_unet(config, base_model_dir, device="cpu")
+            state = torch.load(checkpoint, map_location="cpu")
+            missing, unexpected = wrapper.load_state_dict(state, strict=False)
+            if missing:
+                print(f"[WARN] Missing keys when loading {checkpoint.name}: {missing[:5]}...")
+            if unexpected:
+                print(f"[WARN] Unexpected keys when loading {checkpoint.name}: {unexpected[:5]}...")
+            pipe.unet.load_state_dict(wrapper.unet.state_dict(), strict=True)
+    else:
+        pipe = StableDiffusionPipeline.from_pretrained(
+            base_model_dir,
+            torch_dtype=torch_dtype,
+            safety_checker=None,
+        )
+        pipe.scheduler = DPMSolverMultistepScheduler.from_config(pipe.scheduler.config)
 
     try:
         pipe.enable_xformers_memory_efficient_attention()
@@ -182,41 +226,26 @@ class ImageFolderDataset(Dataset):
 
 def compute_fid_metrics(fake_dir: Path, real_dir: Path) -> Dict[str, float]:
     fid_score = fid.compute_fid(str(real_dir), str(fake_dir))
-    sfid_score = fid.compute_sfid(str(real_dir), str(fake_dir))
-    return {"fid": fid_score, "sfid": sfid_score}
+    # sFID not available in current clean-fid version
+    return {"fid": fid_score}
 
 
 def compute_torchmetrics_metrics(fake_dir: Path, real_dir: Path, device: torch.device, batch_size: int = 32) -> Dict[str, float]:
     fake_ds = ImageFolderDataset(fake_dir)
-    real_ds = ImageFolderDataset(real_dir)
 
     fake_loader = DataLoader(fake_ds, batch_size=batch_size, shuffle=False, num_workers=4)
-    real_loader = DataLoader(real_ds, batch_size=batch_size, shuffle=False, num_workers=4)
 
     inception = InceptionScore(splits=10, normalize=True).to(device)
-    precision_metric = Precision().to(device)
-    recall_metric = Recall().to(device)
 
     for batch in fake_loader:
         batch = batch.to(device)
         inception.update(batch)
-        precision_metric.update(batch, real=False)
-        recall_metric.update(batch, real=False)
-
-    for batch in real_loader:
-        batch = batch.to(device)
-        precision_metric.update(batch, real=True)
-        recall_metric.update(batch, real=True)
 
     is_mean, is_std = inception.compute()
-    precision = precision_metric.compute()
-    recall = recall_metric.compute()
 
     return {
         "inception_score": float(is_mean),
         "inception_score_std": float(is_std),
-        "precision": float(precision),
-        "recall": float(recall),
     }
 
 
@@ -308,4 +337,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
