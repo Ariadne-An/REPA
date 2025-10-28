@@ -1,0 +1,24 @@
+================================
+📊 当前任务监控报告
+================================
+时间: $(date '+%Y-%m-%d %H:%M:%S')
+
+【正在进行】预计算验证集特征
+├─ 进度: 47% (369/782 batches)
+├─ 预计剩余时间: ~25分钟
+└─ 目的: 只计算一次, 所有checkpoint复用
+
+【等待执行】训练进度评估 (6k/12k/18k/24k)
+├─ 每个checkpoint: 300张图片
+├─ 指标: FID, sFID, IS
+├─ 依赖: 特征预计算完成后
+└─ 优势: 每个checkpoint只需几分钟 (vs 之前的1小时+)
+
+【已完成】
+✅ 修复prompt采样问题 (6类鱼→258类多样性)
+✅ 创建完整评估脚本 (FID/sFID/IS)
+✅ CKNNA metrics已保存
+
+【后台任务总数】
+运行中: $(ps aux | grep python | grep -E '(evaluation|alignment|precompute)' | grep -v grep | wc -l) 个Python进程
+
